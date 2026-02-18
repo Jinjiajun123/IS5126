@@ -1,0 +1,23 @@
+Query Profiling Results============================================================Q1: Count reviews per year  SQL: SELECT year, COUNT(*) AS cnt
+        FROM reviews GROUP BY year ORDER BY year  With indexes:    48.27 ms  Without indexes: 9086.29 ms  Speedup: 188.2x  Query Plan (indexed):<sqlite3.Row object at 0x113d13fa0>Q2: Top 10 hotels by avg rating (min 50 reviews)  SQL: SELECT hotel_id, AVG(rating_overall) AS avg_r, COUNT(*) AS cnt
+        FROM reviews GROUP BY hotel_id HAVING cnt >= 50
+        ORDER BY avg_r DESC LIMIT 10  With indexes:    48735.11 ms  Without indexes: 9185.25 ms  Speedup: 0.2x  Query Plan (indexed):<sqlite3.Row object at 0x113cdece0>
+<sqlite3.Row object at 0x112dcc370>Q3: Monthly trends  SQL: SELECT year, month, AVG(rating_overall) AS avg_r, COUNT(*) AS cnt
+        FROM reviews GROUP BY year, month ORDER BY year, month  With indexes:    7797.14 ms  Without indexes: 9262.14 ms  Speedup: 1.2x  Query Plan (indexed):<sqlite3.Row object at 0x1130ddde0>
+<sqlite3.Row object at 0x113d12f20>Q4: Filter by hotel and date range  SQL: SELECT * FROM reviews
+        WHERE hotel_id = (SELECT hotel_id FROM hotels ORDER BY num_reviews DESC LIMIT 1)
+          AND date_parsed BETWEEN '2011-01-01' AND '2012-12-31'  With indexes:    56.51 ms  Without indexes: 9721.60 ms  Speedup: 172.0x  Query Plan (indexed):<sqlite3.Row object at 0x113cdece0>
+<sqlite3.Row object at 0x113d13d30>
+<sqlite3.Row object at 0x113d13220>
+<sqlite3.Row object at 0x113d13250>Q5: Join hotels and reviews  SQL: SELECT h.hotel_id, h.num_reviews,
+               AVG(r.rating_overall) AS avg_r
+        FROM hotels h JOIN reviews r ON h.hotel_id = r.hotel_id
+        GROUP BY h.hotel_id
+        ORDER BY avg_r DESC   With indexes:    27679.67 ms  Without indexes: 14341.10 ms  Speedup: 0.5x  Query Plan (indexed):<sqlite3.Row object at 0x113d13280>
+<sqlite3.Row object at 0x113d132b0>
+<sqlite3.Row object at 0x113d132e0>                                           Query  With Index (ms)  No Index (ms) Speedup
+                      Q1: Count reviews per year            48.27        9086.29  188.2x
+Q2: Top 10 hotels by avg rating (min 50 reviews)         48735.11        9185.25    0.2x
+                              Q3: Monthly trends          7797.14        9262.14    1.2x
+              Q4: Filter by hotel and date range            56.51        9721.60  172.0x
+                     Q5: Join hotels and reviews         27679.67       14341.10    0.5x
