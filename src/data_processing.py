@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+from textblob import TextBlob
 
 # Allow running both as module and as script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -72,9 +73,23 @@ def _parse_review(raw: dict) -> dict | None:
     ratings = raw.get("ratings", {})
     author = raw.get("author", {})
 
+    # Filter: Must have overall rating
+    if ratings.get("overall") is None:
+        return None
+
+    # Filter: Must have substantial text content (> 20 chars)
+    text = raw.get("text", "")
+    if not text or len(text) < 20:
+        return None
+
     dt = parse_date(raw.get("date", ""))
     date_iso = dt.strftime("%Y-%m-%d") if dt else None
     month = dt.month if dt else None
+
+    # Sentiment Analysis
+    blob = TextBlob(text)
+    polarity = blob.sentiment.polarity
+    subjectivity = blob.sentiment.subjectivity
 
     return {
         "hotel_id": raw.get("offering_id"),
@@ -92,7 +107,7 @@ def _parse_review(raw: dict) -> dict | None:
             "hotel_id": raw.get("offering_id"),
             "author_id": author.get("id"),
             "title": raw.get("title"),
-            "text": raw.get("text"),
+            "text": text,
             "date": raw.get("date"),
             "date_parsed": date_iso,
             "year": year,
@@ -107,6 +122,8 @@ def _parse_review(raw: dict) -> dict | None:
             "rating_rooms": ratings.get("rooms"),
             "num_helpful_votes": raw.get("num_helpful_votes", 0),
             "via_mobile": 1 if raw.get("via_mobile") else 0,
+            "sentiment_polarity": polarity,
+            "sentiment_subjectivity": subjectivity,
         },
     }
 
@@ -154,6 +171,7 @@ def _insert_batch(
             r["rating_overall"], r["rating_value"],
             r["rating_location"], r["rating_sleep_quality"],
             r["rating_rooms"], r["num_helpful_votes"], r["via_mobile"],
+            r["sentiment_polarity"], r["sentiment_subjectivity"],
         )
         for r in reviews
     ]
@@ -162,8 +180,9 @@ def _insert_batch(
            (review_id, hotel_id, author_id, title, text, date, date_parsed,
             year, month, date_stayed, rating_service, rating_cleanliness,
             rating_overall, rating_value, rating_location,
-            rating_sleep_quality, rating_rooms, num_helpful_votes, via_mobile)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            rating_sleep_quality, rating_rooms, num_helpful_votes, via_mobile,
+            sentiment_polarity, sentiment_subjectivity)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         review_rows,
     )
     conn.commit()
@@ -171,7 +190,7 @@ def _insert_batch(
 
 # ── Main pipeline ──────────────────────────────────────────────────────────────
 
-def build_database(db_path: Path = DB_PATH, limit: int | None = None) -> int:
+def build_database(db_path: Path = DB_PATH, limit: int | None = 100_000) -> int:
     """
     Read review.json, filter to MIN_YEAR–MAX_YEAR, and write to SQLite.
 

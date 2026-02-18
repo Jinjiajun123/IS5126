@@ -1,3 +1,16 @@
+# 运行方法
+## 1. Install dependencies
+pip install -r requirements.txt
+
+## 2. Build database (already done — skip if reviews.db exists)
+python src/data_processing.py
+
+## 3. Run notebooks in order
+jupyter notebook notebooks/
+
+## 4. Launch dashboard
+streamlit run app/streamlit_app.py
+
 # Assignment Overview
 
 ## Business Context
