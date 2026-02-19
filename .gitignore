@@ -1,6 +1,3 @@
-# Data files (too large for git)
-review.json
-data/reviews.db
 
 # Keep sample DB
 !data/reviews_sample.db
