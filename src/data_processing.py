@@ -12,10 +12,21 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+import argparse
+import numpy as np
+import pandas as pd
 from textblob import TextBlob
+from typing import Generator
+try:
+    from langdetect import detect, LangDetectException
+except ImportError:
+    print("[WARN] langdetect not installed. Please install it using `pip install langdetect`.")
+    detect = None
+    LangDetectException = Exception
 
 # Allow running both as module and as script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import src.utils as utils
 from src.utils import (
     DATA_DIR,
     DB_PATH,
@@ -32,7 +43,7 @@ SAMPLE_SIZE = 5500  # slightly more than 5 000 required
 BATCH_SIZE = 10_000
 
 
-# ── Schema helpers ─────────────────────────────────────────────────────────────
+# Schema helpers
 
 def _create_schema(conn: sqlite3.Connection) -> None:
     """Execute the DDL from data_schema.sql."""
@@ -59,7 +70,7 @@ def _create_indexes(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-# ── Parsing one JSON line ──────────────────────────────────────────────────────
+# Parsing one JSON line
 
 def _parse_review(raw: dict) -> dict | None:
     """
@@ -78,9 +89,17 @@ def _parse_review(raw: dict) -> dict | None:
         return None
 
     # Filter: Must have substantial text content (> 20 chars)
-    text = raw.get("text", "")
+    text = raw.get("text", "").strip()
     if not text or len(text) < 20:
         return None
+
+    # Fast Language Filter
+    if detect is not None:
+        try:
+            if detect(text) != 'en':
+                return None # Skip non-English reviews
+        except LangDetectException:
+            return None # Skip reviews where language detection fails
 
     dt = parse_date(raw.get("date", ""))
     date_iso = dt.strftime("%Y-%m-%d") if dt else None
@@ -128,7 +147,7 @@ def _parse_review(raw: dict) -> dict | None:
     }
 
 
-# ── Bulk insert ────────────────────────────────────────────────────────────────
+# Bulk insert
 
 def _insert_batch(
     conn: sqlite3.Connection,
@@ -188,7 +207,7 @@ def _insert_batch(
     conn.commit()
 
 
-# ── Main pipeline ──────────────────────────────────────────────────────────────
+# Main pipeline
 
 def build_database(db_path: Path = DB_PATH, limit: int | None = 100_000) -> int:
     """
@@ -257,10 +276,75 @@ def build_database(db_path: Path = DB_PATH, limit: int | None = 100_000) -> int:
     """)
     conn.commit()
 
+    print(f"[data_processing] Filtering hotels with < 50 reviews and cleaning up …")
+    conn.execute("DELETE FROM hotels WHERE num_reviews < 50")
+    conn.execute("DELETE FROM reviews WHERE hotel_id NOT IN (SELECT hotel_id FROM hotels)")
+    conn.execute("DELETE FROM authors WHERE author_id NOT IN (SELECT author_id FROM reviews)")
+    conn.commit()
+
+    # Get final count
+    total = conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0]
+
     elapsed = time.time() - t0
     print(f"[data_processing] Done — {total:,} reviews in {elapsed:.1f}s → {db_path}")
+
+    # Compute credibility weights for every review
+    compute_review_weights(conn)
+
     conn.close()
     return total
+
+
+def compute_review_weights(conn: sqlite3.Connection) -> None:
+    """
+    Compute a credibility weight for each review based on 4 signals:
+      1. Helpful votes (community validation)
+      2. Author experience (num_reviews, num_cities)
+      3. Text length (detail level)
+      4. Objectivity (1 - subjectivity)
+    
+    Weight formula: 1.0 (baseline) + sum of 4 normalized boosts.
+    Results stored in reviews.review_weight column.
+    """
+    import math
+
+    print("[data_processing] Computing review credibility weights …")
+    
+    # Fetch review data with author stats via JOIN
+    df = pd.read_sql_query("""
+        SELECT r.review_id,
+               COALESCE(r.num_helpful_votes, 0) AS helpful,
+               COALESCE(a.num_reviews, 0)        AS author_revs,
+               COALESCE(LENGTH(r.text), 0)       AS text_len,
+               COALESCE(r.sentiment_subjectivity, 0.5) AS subj
+        FROM reviews r
+        LEFT JOIN authors a ON r.author_id = a.author_id
+    """, conn)
+
+    if df.empty:
+        print("[data_processing] No reviews to weight.")
+        return
+
+    # Log-scaled normalization denominators (avoid division by zero)
+    log_max_helpful = max(np.log1p(df["helpful"].max()), 1e-9)
+    log_max_author  = max(np.log1p(df["author_revs"].max()), 1e-9)
+
+    # Vectorized weight computation
+    w = (1.0
+         + np.log1p(df["helpful"])     / log_max_helpful      # helpful boost
+         + np.log1p(df["author_revs"]) / log_max_author       # experience boost
+         + np.minimum(df["text_len"] / 500.0, 1.0)            # length boost (capped)
+         + (1.0 - df["subj"])                                 # objectivity boost
+    )
+
+    # Write weights back to DB
+    conn.executemany(
+        "UPDATE reviews SET review_weight = ? WHERE review_id = ?",
+        list(zip(w.tolist(), df["review_id"].tolist()))
+    )
+    conn.commit()
+
+    print(f"[data_processing] Weights computed — min={w.min():.2f}, avg={w.mean():.2f}, max={w.max():.2f}")
 
 
 def build_sample_database(
@@ -281,46 +365,60 @@ def build_sample_database(
     # Create schema in destination
     _create_schema(dst)
 
-    # Sample review IDs
-    ids = [
-        row[0]
-        for row in src.execute("SELECT review_id FROM reviews").fetchall()
-    ]
-    sampled_ids = random.sample(ids, min(sample_size, len(ids)))
-    placeholders = ",".join("?" * len(sampled_ids))
+    # Sample hotels instead of reviews
+    # Get all valid hotels and shuffle them
+    hotels = src.execute("SELECT hotel_id, num_reviews FROM hotels WHERE num_reviews >= 50").fetchall()
+    random.shuffle(hotels)
 
-    # Copy sampled reviews
-    rows = src.execute(
-        f"SELECT * FROM reviews WHERE review_id IN ({placeholders})", sampled_ids
-    ).fetchall()
+    sampled_hotel_ids = []
+    current_size = 0
+    for hid, count in hotels:
+        sampled_hotel_ids.append(hid)
+        current_size += count
+        if current_size >= sample_size:
+            break
+
+    if not sampled_hotel_ids:
+        print("[data_processing] No valid hotels found for sample.")
+        src.close()
+        dst.close()
+        return 0
+
+    # Process in chunks of 900 to avoid SQLite variable limits
+    chunk_size = 900
+    
+    # 1. Copy related hotels
+    for i in range(0, len(sampled_hotel_ids), chunk_size):
+        chunk = sampled_hotel_ids[i:i + chunk_size]
+        ph = ",".join("?" * len(chunk))
+        hotel_rows = src.execute(f"SELECT * FROM hotels WHERE hotel_id IN ({ph})", chunk).fetchall()
+        dst.executemany("INSERT OR IGNORE INTO hotels (hotel_id, num_reviews) VALUES (?, ?)", hotel_rows)
+
+    # 2. Copy related reviews
     cols = [d[0] for d in src.execute("SELECT * FROM reviews LIMIT 1").description]
     insert_sql = f"INSERT OR IGNORE INTO reviews ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})"
-    dst.executemany(insert_sql, rows)
+    
+    for i in range(0, len(sampled_hotel_ids), chunk_size):
+        chunk = sampled_hotel_ids[i:i + chunk_size]
+        ph = ",".join("?" * len(chunk))
+        rows = src.execute(f"SELECT * FROM reviews WHERE hotel_id IN ({ph})", chunk).fetchall()
+        dst.executemany(insert_sql, rows)
 
-    # Copy related hotels
-    hotel_ids = list({r[1] for r in rows})  # hotel_id is col index 1
-    ph2 = ",".join("?" * len(hotel_ids))
-    hotel_rows = src.execute(
-        f"SELECT * FROM hotels WHERE hotel_id IN ({ph2})", hotel_ids
-    ).fetchall()
-    dst.executemany(
-        "INSERT OR IGNORE INTO hotels (hotel_id, num_reviews) VALUES (?, ?)",
-        hotel_rows,
-    )
-
-    # Copy related authors
-    author_ids = list({r[2] for r in rows if r[2]})  # author_id is col index 2
-    ph3 = ",".join("?" * len(author_ids))
-    author_rows = src.execute(
-        f"SELECT * FROM authors WHERE author_id IN ({ph3})", author_ids
-    ).fetchall()
+    # 3. Copy related authors
+    # Extract distinct author_ids from the destination database's reviews
+    author_ids = [row[0] for row in dst.execute("SELECT DISTINCT author_id FROM reviews WHERE author_id IS NOT NULL").fetchall()]
     author_cols = [d[0] for d in src.execute("SELECT * FROM authors LIMIT 1").description]
-    dst.executemany(
-        f"INSERT OR IGNORE INTO authors ({','.join(author_cols)}) VALUES ({','.join('?' * len(author_cols))})",
-        author_rows,
-    )
+    author_insert_sql = f"INSERT OR IGNORE INTO authors ({','.join(author_cols)}) VALUES ({','.join('?' * len(author_cols))})"
+    
+    for i in range(0, len(author_ids), chunk_size):
+        chunk = author_ids[i:i + chunk_size]
+        ph = ",".join("?" * len(chunk))
+        author_rows = src.execute(f"SELECT * FROM authors WHERE author_id IN ({ph})", chunk).fetchall()
+        dst.executemany(author_insert_sql, author_rows)
 
-    # Update hotel counts in sample
+    dst.commit()
+
+    # Update hotel counts in sample just to be safe
     dst.execute("""
         UPDATE hotels SET num_reviews = (
             SELECT COUNT(*) FROM reviews WHERE reviews.hotel_id = hotels.hotel_id
@@ -330,12 +428,16 @@ def build_sample_database(
 
     count = dst.execute("SELECT COUNT(*) FROM reviews").fetchone()[0]
     print(f"[data_processing] Sample DB → {count:,} reviews → {sample_db}")
+
+    # Compute credibility weights for the sample DB
+    compute_review_weights(dst)
+
     src.close()
     dst.close()
     return count
 
 
-# ── CLI entry point ────────────────────────────────────────────────────────────
+# CLI entry point
 
 if __name__ == "__main__":
     sample_only = "--sample" in sys.argv

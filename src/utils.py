@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-# ── Constants ──────────────────────────────────────────────────────────────────
+# Constants
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 PROFILING_DIR = PROJECT_ROOT / "profiling"
@@ -40,7 +40,7 @@ MIN_YEAR = 2008
 MAX_YEAR = 2012
 
 
-# ── Helper Functions ──────────────────────────────────────────────────────────
+# Helper Functions
 
 def get_db_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
     """Return a SQLite connection with WAL mode and foreign keys enabled."""

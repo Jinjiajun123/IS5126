@@ -13,14 +13,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# ── Path setup ─────────────────────────────────────────────────────────────────
+# Path setup
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.utils import DB_PATH, SAMPLE_DB_PATH, RATING_COLUMNS, RATING_LABELS, get_db_connection
 
-# ── Page config ────────────────────────────────────────────────────────────────
+# Page config
 st.set_page_config(
     page_title="Hotel Performance Dashboard",
     page_icon="🏨",
@@ -28,7 +28,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Styling ────────────────────────────────────────────────────────────────────
+# Styling
 st.markdown("""
 <style>
     /* Global Font & Background */
@@ -52,18 +52,12 @@ st.markdown("""
         border: 1px solid #E2E8F0;
     }
     
-    /* Sidebar */
-    section[data-testid="stSidebar"] {
-        background-color: #1A202C;
-    }
-    section[data-testid="stSidebar"] * {
-        color: #E2E8F0;
-    }
+
 </style>
 """, unsafe_allow_html=True)
 
 
-# ── DB helper ──────────────────────────────────────────────────────────────────
+# DB helper
 @st.cache_data(ttl=600)
 def load_data(db_path: str):
     """Load all reviews into a DataFrame (cached)."""
@@ -85,31 +79,121 @@ def load_hotels(db_path: str):
     return hotels
 
 
-def detect_db():
+@st.cache_data(ttl=3600)
+def get_hotel_clusters(db_path_str: str, n_clusters: int = 4, min_reviews: int = 20):
+    """Cached computation of hotel market positioning."""
+    from src.benchmarking import compute_hotel_features, cluster_hotels
+    features = compute_hotel_features(db_path=Path(db_path_str), min_reviews=min_reviews)
+    if features.empty:
+        return pd.DataFrame()
+    df_cl, sil, _, _ = cluster_hotels(features, n_clusters=n_clusters)
+    return df_cl
+
+
+# Helpers
+def detect_db(force_sample=False):
     """Use full DB if available, else sample."""
+    if force_sample:
+        return str(SAMPLE_DB_PATH)
     if DB_PATH.exists():
         return str(DB_PATH)
     return str(SAMPLE_DB_PATH)
 
 
-# ── Sidebar ────────────────────────────────────────────────────────────────────
-st.sidebar.image("app/logo.png", width=120)
+# Fixed 4-tier hotel classification labels (ranked by quality, index 0 = best)
+HOTEL_TIER_LABELS = [
+    "👑 Luxury",
+    "🏨 Upscale",
+    "🏠 Midscale",
+    "🏷️ Economy",
+]
+
+
+def assign_cluster_labels(df_cl: pd.DataFrame) -> dict:
+    """
+    Rank clusters by their average overall rating (descending)
+    and assign the fixed 4-tier labels accordingly.
+    Returns a dict mapping cluster_id -> label string.
+    """
+    cluster_means = df_cl.groupby("cluster")["avg_rating_overall"].mean()
+    ranked = cluster_means.sort_values(ascending=False).index.tolist()
+    labels = {}
+    for i, cid in enumerate(ranked):
+        labels[cid] = HOTEL_TIER_LABELS[min(i, len(HOTEL_TIER_LABELS) - 1)]
+    return labels
+
+
+def get_cluster_label(cluster_mean_series: pd.Series) -> str:
+    """Fallback: generate a label for a single cluster based on overall rating."""
+    overall = cluster_mean_series.get("avg_rating_overall", 3.0)
+    if overall >= 4.2:
+        return HOTEL_TIER_LABELS[0]
+    elif overall >= 3.8:
+        return HOTEL_TIER_LABELS[1]
+    elif overall >= 3.3:
+        return HOTEL_TIER_LABELS[2]
+    else:
+        return HOTEL_TIER_LABELS[3]
+
+# Sidebar
+st.sidebar.markdown(
+    """
+    <div style="display: flex; justify-content: flex-start; margin-bottom: 20px;">
+        <svg viewBox="0 0 200 200" width="120" height="120" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <linearGradient id="primary" x1="0%" y1="100%" x2="100%" y2="0%">
+                    <stop offset="0%" stop-color="#4f46e5"/>
+                    <stop offset="100%" stop-color="#3b82f6"/>
+                </linearGradient>
+            </defs>
+            <circle cx="100" cy="100" r="95" fill="#EEF2FF" />
+            <rect x="50" y="90" width="25" height="60" rx="4" fill="url(#primary)" opacity="0.8"/>
+            <rect x="85" y="50" width="25" height="100" rx="4" fill="url(#primary)"/>
+            <rect x="120" y="110" width="25" height="40" rx="4" fill="url(#primary)" opacity="0.6"/>
+            <path d="M 40 120 L 85 70 L 120 90 L 155 45" fill="none" stroke="#f43f5e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="155" cy="45" r="8" fill="#f43f5e" />
+        </svg>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 st.sidebar.title("Hotel Analytics")
-page = st.sidebar.radio(
-    "Menu",
-    ["📊 Executive Overview", "🔍 Hotel Explorer", "🔎 Global Search", "📈 Trends",
-     "🏆 Market Positioning", "⭐ Customer Priorities", "🧠 Sentiment Analysis"],
+
+use_sample = st.sidebar.toggle("🧪 Use ML Sample Dataset", value=False, help="Switch to the 5,000-review sample database that has full NLP features extracted.")
+
+# Initialize session state for cross-page navigation
+if "nav_hotel_id" not in st.session_state:
+    st.session_state.nav_hotel_id = None
+
+main_page = st.sidebar.radio(
+    "Main Menu",
+    [
+        "📊 Executive Overview", 
+        "🔍 Hotel Explorer",
+        "⭐ Customer Priorities"
+    ],
+    key="main_menu",
 )
 
-db_path = detect_db()
+active_view = main_page
+
+db_path = detect_db(force_sample=use_sample)
 df = load_data(db_path)
 hotels = load_hotels(db_path)
+
+# Extract global hotel selection logic so it applies to both sub-pages
+hotel_ids = sorted(df["hotel_id"].unique())
+
+if main_page == "🔍 Hotel Explorer":
+    pass # we will handle this state mapping down below in the routing section
+else:
+    global_selected_hotel = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE 1: OVERVIEW
 # ═══════════════════════════════════════════════════════════════════════════════
-if page == "📊 Executive Overview":
+if active_view == "📊 Executive Overview":
     st.title("Executive Overview")
     st.caption("High-level performance snapshot")
 
@@ -118,253 +202,556 @@ if page == "📊 Executive Overview":
     c2.metric("Hotels Monitored", f"{df['hotel_id'].nunique():,}")
     c3.metric("Average Rating", f"{df['rating_overall'].mean():.2f} / 5.0")
     c4.metric("Data Period",
-              f"{df['date_parsed'].min().strftime('%b %Y')} – {df['date_parsed'].max().strftime('%b %Y')}")
+              f"{df['date_parsed'].dt.year.min()} - {df['date_parsed'].dt.year.max()}")
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # MARKET POSITIONING (Moved from standalone page)
+    # ═══════════════════════════════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("Market Positioning & Segmentation")
+    
+
+    n_clusters = 4
+    min_rev = 20
+
+    with st.spinner("Analyzing market segments..."):
+        df_cl = get_hotel_clusters(db_path, n_clusters=n_clusters, min_reviews=min_rev)
+
+    if not df_cl.empty:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Segment Distribution**")
+            sizes = df_cl["cluster"].value_counts().sort_index().reset_index()
+            sizes.columns = ["cluster", "Hotels"]
+            
+            # Map cluster IDs to ranked tier names
+            cluster_means = df_cl.groupby("cluster").mean()
+            semantic_names = assign_cluster_labels(df_cl)
+            sizes["Segment"] = sizes["cluster"].map(semantic_names)
+            
+            fig = px.bar(sizes, x="Segment", y="Hotels", color="Segment",
+                         color_discrete_sequence=px.colors.qualitative.Pastel)
+            fig.update_layout(showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col2:
+            st.markdown("**Segment Characteristics**")
+            rating_cols = [c for c in df_cl.columns if c.startswith("avg_rating_")]
+            labels_short = [c.replace("avg_rating_", "").replace("_", " ").title() for c in rating_cols]
+
+            fig = go.Figure()
+            for cid, row in cluster_means.iterrows():
+                r_values = row[rating_cols].tolist()
+                fig.add_trace(go.Scatterpolar(
+                    r=r_values + [r_values[0]],
+                    theta=labels_short + [labels_short[0]],
+                    fill="toself", name=semantic_names[cid],
+                ))
+            fig.update_layout(polar=dict(radialaxis=dict(range=[2, 5], visible=True)), height=400)
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Per-Tier Hotel Lists
+        st.markdown("**🏨 Hotels by Tier**")
+        tier_order = {label: i for i, label in enumerate(HOTEL_TIER_LABELS)}
+        sorted_tiers = sorted(semantic_names.items(), key=lambda x: tier_order.get(x[1], 99))
+
+        for cid, tier_name in sorted_tiers:
+            tier_hotels = df_cl[df_cl["cluster"] == cid].copy()
+            with st.expander(f"{tier_name}  —  {len(tier_hotels)} hotels", expanded=False):
+                sort_by = st.radio(
+                    "Sort by", ["Overall Rating", "Review Count"],
+                    horizontal=True, key=f"sort_{cid}",
+                )
+                if sort_by == "Overall Rating":
+                    tier_hotels = tier_hotels.sort_values("avg_rating_overall", ascending=False)
+                else:
+                    tier_hotels = tier_hotels.sort_values("review_count", ascending=False)
+
+                display_df = tier_hotels[["review_count", "avg_rating_overall"]].copy()
+                display_df.columns = ["Reviews", "Overall Rating"]
+                display_df["Overall Rating"] = display_df["Overall Rating"].round(2)
+                display_df.index.name = "Hotel ID"
+                st.dataframe(display_df, use_container_width=True)
 
     st.divider()
-
     # Simple Visuals
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Global Rating Distribution")
-        fig = px.histogram(df, x="rating_overall", nbins=5, 
-                           color_discrete_sequence=["#4FD1C5"],
-                           title="Distribution of Overall Ratings")
-        fig.update_layout(bargap=0.2, showlegend=False, xaxis_title="Rating (1-5)", yaxis_title="Count")
-        st.plotly_chart(fig, use_container_width=True)
+        rating_counts = df["rating_overall"].value_counts().sort_index().reset_index()
+        rating_counts.columns = ["Rating", "Count"]
+        rating_counts["Rating Name"] = rating_counts["Rating"].astype(str) + " Stars"
+        
+        fig1 = px.pie(rating_counts, values="Count", names="Rating Name", hole=0.55,
+                      color_discrete_sequence=px.colors.sequential.Teal,
+                      title="Distribution of Overall Ratings")
+        fig1.update_traces(textposition='inside', textinfo='percent+label', 
+                           marker=dict(line=dict(color='#0E1117', width=2)))
+        fig1.update_layout(showlegend=False, margin=dict(t=40, b=0, l=0, r=0))
+        st.plotly_chart(fig1, use_container_width=True)
 
     with col2:
         st.subheader("Review Volume Trend")
         year_counts = df.groupby("year").size().reset_index(name="count")
-        fig = px.bar(year_counts, x="year", y="count", 
-                     color_discrete_sequence=["#667EEA"],
-                     title="Reviews Collected per Year")
-        fig.update_layout(xaxis_title="Year", yaxis_title="Review Count")
-        st.plotly_chart(fig, use_container_width=True)
+        
+        fig2 = px.area(year_counts, x="year", y="count",
+                       title="Reviews Collected per Year",
+                       color_discrete_sequence=["#667EEA"])
+        fig2.update_traces(line_shape='spline', fill='tozeroy', 
+                           line=dict(width=3), fillcolor='rgba(102, 126, 234, 0.4)')
+        fig2.update_layout(xaxis_title="Year", yaxis_title="Review Count",
+                           margin=dict(t=40, b=0, l=0, r=0))
+        st.plotly_chart(fig2, use_container_width=True)
 
     # Top hotels
     st.subheader("Top Performing Hotels")
-    st.markdown("_Hotels with the highest average rating (minimum 30 reviews)_")
+    st.markdown("_Hotels with the highest average rating (minimum 50 reviews)_")
     top = (df.groupby("hotel_id")
            .agg(avg_rating=("rating_overall", "mean"), reviews=("rating_overall", "count"))
-           .query("reviews >= 30")
+           .query("reviews >= 50")
            .nlargest(10, "avg_rating")
            .reset_index())
     top["avg_rating"] = top["avg_rating"].round(2)
     top.columns = ["Hotel ID", "Average Rating", "Review Count"]
-    st.dataframe(top, use_container_width=True, hide_index=True)
+    
+    st.dataframe(
+        top,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Hotel ID": st.column_config.TextColumn(
+                "🏨 Hotel ID",
+                help="Unique Identifier for the Hotel"
+            ),
+            "Average Rating": st.column_config.NumberColumn(
+                "⭐ Average Rating",
+                help="Overall score out of 5 stars",
+                format="%.2f",
+            ),
+            "Review Count": st.column_config.ProgressColumn(
+                "📝 Review Volume",
+                help="Total number of reviews collected",
+                format="%d",
+                min_value=0,
+                max_value=int(top["Review Count"].max())
+            )
+        }
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE 2: HOTEL EXPLORER
 # ═══════════════════════════════════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 2: HOTEL EXPLORER
-# ═══════════════════════════════════════════════════════════════════════════════
-elif page == "🔍 Hotel Explorer":
-    st.title("Hotel Explorer")
-    st.markdown("_Deep dive into specific hotel performance_")
-
-    hotel_ids = sorted(df["hotel_id"].unique())
-    selected = st.selectbox("Select Hotel ID", hotel_ids)
-
-    hdf = df[df["hotel_id"] == selected]
-    st.info(f"Analyzing **{len(hdf):,} reviews** for Hotel **{selected}**")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Performance Profile")
-        means = hdf[RATING_COLUMNS].mean()
-        labels = [RATING_LABELS[c] for c in RATING_COLUMNS]
-        fig = go.Figure(go.Scatterpolar(
-            r=means.values.tolist() + [means.values[0]],
-            theta=labels + [labels[0]],
-            fill="toself", fillcolor="rgba(102,126,234,0.3)",
-            line=dict(color="#5A67D8", width=3),
-        ))
-        fig.update_layout(
-            polar=dict(radialaxis=dict(range=[1, 5], visible=True)), 
-            height=400,
-            margin=dict(t=20, b=20, l=40, r=40)
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        st.subheader("Rating History")
-        monthly = hdf.set_index("date_parsed").resample("M")["rating_overall"].mean().reset_index()
-        fig = px.line(monthly, x="date_parsed", y="rating_overall",
-                      labels={"date_parsed": "Date", "rating_overall": "Avg Rating"},
-                      color_discrete_sequence=["#9F7AEA"])
-        fig.update_layout(yaxis_range=[1, 5])
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Latest Customer Feedback")
-    recent = hdf.nlargest(5, "date_parsed")[["date", "title", "rating_overall", "text"]]
-    recent.columns = ["Date", "Title", "Rating", "Review"]
-    for i, row in recent.iterrows():
-        with st.container():
-            st.markdown(f"**{'⭐' * int(row['Rating'])}** — *{row['Date']}*")
-            st.markdown(f"**{row['Title']}**")
-            st.markdown(f"> {row['Review']}")
-            st.divider()
-
-
-    for i, row in recent.iterrows():
-        with st.container():
-            st.markdown(f"**{'⭐' * int(row['Rating'])}** — *{row['Date']}*")
-            st.markdown(f"**{row['Title']}**")
-            st.markdown(f"> {row['Review']}")
-            st.divider()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE: GLOBAL SEARCH
-# ═══════════════════════════════════════════════════════════════════════════════
-elif page == "🔎 Global Search":
-    st.title("Global Review Search")
-    st.markdown("_Find specific feedback across all hotels_")
-
-    query = st.text_input("Enter keywords (e.g., 'breakfast', 'front desk', 'cleanliness')")
-
-    if query:
-        # Search in text and title
-        mask = df["text"].str.contains(query, case=False, na=False) | \
-               df["title"].str.contains(query, case=False, na=False)
-        results = df[mask]
-
-        st.info(f"Found **{len(results):,}** reviews matching '**{query}**'")
-
-        if not results.empty:
-            st.caption("Showing top 100 most recent matches:")
-            display_cols = ["date_parsed", "hotel_id", "rating_overall", "title", "text"]
-            
-            # Format for display
-            display_df = results.sort_values("date_parsed", ascending=False).head(100)[display_cols].copy()
-            display_df["date_parsed"] = display_df["date_parsed"].dt.strftime("%Y-%m-%d")
-            display_df.columns = ["Date", "Hotel ID", "Rating", "Title", "Review Text"]
-            
-            st.dataframe(display_df, use_container_width=True, hide_index=True, height=600)
-    else:
-        st.markdown("Use the search bar above to find reviews containing specific words or phrases.")
-        st.markdown("Example searches:")
-        st.markdown("- `bed bugs`")
-        st.markdown("- `manager`")
-        st.markdown("- `noisy`")
-        st.markdown("- `excellent service`")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 3: TREND ANALYSIS
-# ═══════════════════════════════════════════════════════════════════════════════
-elif page == "📈 Trends":
-    st.title("Market Trends")
-    st.markdown("_Track performance metrics over time_")
-
-    # Metrics selector
-    st.subheader("Monthly Performance Trends")
-    rating_choice = st.selectbox("Select Metric", list(RATING_LABELS.values()))
-    col_name = [k for k, v in RATING_LABELS.items() if v == rating_choice][0]
-
-    monthly = (df.set_index("date_parsed")
-               .resample("M")[col_name].agg(["mean", "count"]).reset_index())
-    
-    fig = px.line(monthly, x="date_parsed", y="mean",
-                  labels={"date_parsed": "Date", "mean": f"Avg {rating_choice}"},
-                  color_discrete_sequence=["#4299E1"])
-    
-    # Dual axis for volume
-    fig.add_bar(x=monthly["date_parsed"], y=monthly["count"], name="Review Volume",
-                opacity=0.15, marker_color="#ED8936", yaxis="y2")
-    
-    fig.update_layout(
-        title=f"Trend for {rating_choice}",
-        yaxis2=dict(title="Review Volume", overlaying="y", side="right", showgrid=False),
-        legend=dict(orientation="h", y=1.1),
-        hovermode="x unified"
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Year-over-Year Performance")
-    yearly = df.groupby("year")[RATING_COLUMNS].mean().reset_index()
-    yearly_melted = yearly.melt(id_vars="year", var_name="dimension", value_name="avg_rating")
-    yearly_melted["dimension"] = yearly_melted["dimension"].map(RATING_LABELS)
-    
-    fig = px.bar(yearly_melted, x="dimension", y="avg_rating", color="year",
-                 barmode="group", color_continuous_scale="Purples",
-                 labels={"dimension": "", "avg_rating": "Avg Rating"})
-    st.plotly_chart(fig, use_container_width=True)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 4: COMPETITIVE BENCHMARKING
-# ═══════════════════════════════════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 4: MARKET POSITIONING
-# ═══════════════════════════════════════════════════════════════════════════════
-elif page == "🏆 Market Positioning":
-    st.title("Market Positioning")
-    st.markdown("_Benchmark hotels against similar market segments_")
-
-    from src.benchmarking import (
-        compute_hotel_features, cluster_hotels,
-        analyze_group_performance, generate_recommendations,
+elif main_page == "🔍 Hotel Explorer":
+    st.markdown(
+        """
+        <style>
+        /* Target the selectbox dropdown container and scale it uniformly */
+        .stSelectbox {
+            transform: scale(1.15);
+            transform-origin: top center;
+            margin-bottom: 20px;
+            width: 80% !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+        }
+        .stSelectbox div[data-baseweb="select"] {
+            border-radius: 8px;
+        }
+        /* Style the header elements */
+        .chat-header-container {
+            text-align: center;
+            margin-top: 2rem;
+            margin-bottom: 2rem;
+        }
+        .chat-header-title {
+            font-size: 3.5rem;
+            font-weight: 800;
+            margin-bottom: 0px;
+            padding-bottom: 0px;
+            background: -webkit-linear-gradient(45deg, #4f46e5, #ec4899);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .chat-header-subtitle {
+            font-size: 1.25rem;
+            color: #64748b;
+            margin-top: 5px;
+        }
+        </style>
+        """, 
+        unsafe_allow_html=True
     )
 
-    # Simplified controls (hidden from main view or fixed)
-    n_clusters = 5
-    min_rev = 20
+    # 2. Centered Welcoming Header
+    st.markdown(
+        """
+        <div class="chat-header-container">
+            <h1 class="chat-header-title">Hotel Explorer</h1>
+            <p class="chat-header-subtitle">Which hotel would you like to analyze today?</p>
+        </div>
+        """, 
+        unsafe_allow_html=True
+    )
 
-    with st.spinner("Analyzing market segments..."):
-        features = compute_hotel_features(db_path=Path(db_path), min_reviews=min_rev)
-        df_cl, sil, _, _ = cluster_hotels(features, n_clusters=n_clusters)
+    # Render top-level controls inside main area
+    default_idx = None
+    if st.session_state.nav_hotel_id is not None and st.session_state.nav_hotel_id in hotel_ids:
+        default_idx = hotel_ids.index(st.session_state.nav_hotel_id)
+        st.session_state.nav_hotel_id = None  # Clear after use
 
-    st.success(f"Identified {n_clusters} distinct market segments based on guest feedback patterns.")
+    # 3. Big Search Box (Selectbox)
+    global_selected_hotel = st.selectbox(
+        "Search Hotel ID", 
+        hotel_ids, 
+        index=default_idx,
+        placeholder="Type or select a Hotel ID...",
+        label_visibility="collapsed"
+    )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Market Segment Distribution")
-        sizes = df_cl["cluster"].value_counts().sort_index().reset_index()
-        sizes.columns = ["Segment", "Hotels"]
-        sizes["Segment"] = sizes["Segment"].apply(lambda x: f"Segment {x+1}")
+    if global_selected_hotel:
+
+        # 4. Spacing before pills
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+        # Sub-navigation modern tabs (Pills)
+        try:
+            sub_page = st.pills(
+                "View Context",
+                ["🔍 Overview", "📈 Historical Trends", "🏅 Comparable Hotels"],
+                default="🔍 Overview",
+                label_visibility="collapsed",
+                key="hotel_submenu_main"
+            )
+            if not sub_page: # Prevent deselecting all tabs
+                sub_page = "🔍 Overview"
+        except AttributeError:
+            # Fallback for Streamlit versions < 1.40
+            sub_page = st.radio(
+                "View Context",
+                ["🔍 Overview", "📈 Historical Trends", "🏅 Comparable Hotels"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="hotel_submenu_main"
+            )
+    
+        st.divider()
+
+        selected = global_selected_hotel
+        hdf = df[df["hotel_id"] == selected]
+
+        if sub_page == "🔍 Overview":
+            st.markdown(f"_Deep dive into specific hotel performance for **Hotel {selected}**_")
+
+            # Fetch Clustering Data for the selected hotel
+            min_rev_explorer = 5 
+            df_cl = get_hotel_clusters(db_path, n_clusters=4, min_reviews=min_rev_explorer)
+            in_cluster_analysis = not df_cl.empty and selected in df_cl.index
+    
+            if in_cluster_analysis:
+                tier_labels = assign_cluster_labels(df_cl)
+                cluster_id = df_cl.loc[selected, "cluster"]
+                cluster_peers = df_cl[df_cl["cluster"] == cluster_id]
+                cluster_mean = cluster_peers.mean()
+                segment_name = tier_labels.get(cluster_id, get_cluster_label(cluster_mean))
+            else:
+                st.warning(f"**Market Segment:** This hotel does not have enough reviews (minimum {min_rev_explorer}) to be reliably placed into a competitive market segment.")
+
+            # Explicit Rating Scores
+            st.subheader("⭐ Rating Breakdown")
+            means = hdf[RATING_COLUMNS].mean()
+
+            # Helper: compute delta string vs segment average
+            def _delta(col_name):
+                if not in_cluster_analysis:
+                    return None
+                seg_val = cluster_mean.get(f"avg_{col_name}", cluster_mean.get(col_name, None))
+                if seg_val is None:
+                    return None
+                diff = means.get(col_name, 0) - seg_val
+                return f"{diff:+.2f} vs segment"
+
+            # Row 0: Review Count
+            r0c1, r1c2 = st.columns(2)
+            r0c1.metric("Total Reviews", f"{len(hdf):,}")
+            r1c2.metric("Hotel Tier", f"{segment_name}")
+
+            # Row 1: Overall + Service + Cleanliness + Value
+            r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+            r1c1.metric("Overall", f"{means.get('rating_overall', 0):.2f} / 5", delta=_delta("rating_overall"))
+            r1c2.metric("Service", f"{means.get('rating_service', 0):.2f} / 5", delta=_delta("rating_service"))
+            r1c3.metric("Cleanliness", f"{means.get('rating_cleanliness', 0):.2f} / 5", delta=_delta("rating_cleanliness"))
+            r1c4.metric("Value", f"{means.get('rating_value', 0):.2f} / 5", delta=_delta("rating_value"))
+
+            # Row 2: Location + Sleep Quality + Rooms + Sentiment
+            r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+            r2c1.metric("Location", f"{means.get('rating_location', 0):.2f} / 5", delta=_delta("rating_location"))
+            r2c2.metric("Sleep Quality", f"{means.get('rating_sleep_quality', 0):.2f} / 5", delta=_delta("rating_sleep_quality"))
+            r2c3.metric("Rooms", f"{means.get('rating_rooms', 0):.2f} / 5", delta=_delta("rating_rooms"))
+            if "sentiment_polarity" in hdf.columns:
+                avg_sent = hdf["sentiment_polarity"].mean()
+                sent_emoji = "😊" if avg_sent > 0.2 else ("😐" if avg_sent > 0 else "😟")
+                r2c4.metric("Sentiment", f"{avg_sent:.2f} {sent_emoji}",
+                             help="Sentiment Polarity measures how positive or negative the review language is, computed by TextBlob NLP.\n\n"
+                                  "• **+0.2 to +1.0**: Positive 😊 (e.g. 'amazing', 'excellent')\n"
+                                  "• **0 to +0.2**: Neutral 😐 (e.g. 'okay', 'average')\n"
+                                  "• **-1.0 to 0**: Negative 😟 (e.g. 'terrible', 'horrible')")
+
+            st.divider()
+
+            # Customer Feedback (Tabs: Latest + Most Helpful + Search)
+            st.subheader("💬 Customer Feedback")
+            tab_latest, tab_helpful, tab_search = st.tabs(["🕒 Latest Reviews", "👍 Most Helpful Reviews", "🔎 Search Reviews"])
+
+            with tab_latest:
+                recent = hdf.nlargest(5, "date_parsed")[["date", "title", "rating_overall", "text"]]
+                recent.columns = ["Date", "Title", "Rating", "Review"]
+                for _, row in recent.iterrows():
+                    with st.container():
+                        st.markdown(f"**{'⭐' * int(row['Rating'])}** — *{row['Date']}*")
+                        st.markdown(f"**{row['Title']}**")
+                        st.markdown(f"> {row['Review'][:500]}{'…' if len(str(row['Review'])) > 500 else ''}")
+                        st.divider()
+
+            with tab_helpful:
+                if "num_helpful_votes" in hdf.columns:
+                    helpful = hdf.nlargest(5, "num_helpful_votes")[["date", "title", "rating_overall", "text", "num_helpful_votes"]]
+                    helpful.columns = ["Date", "Title", "Rating", "Review", "Helpful Votes"]
+                    for _, row in helpful.iterrows():
+                        with st.container():
+                            st.markdown(f"**{'⭐' * int(row['Rating'])}** — *{row['Date']}* — 👍 **{int(row['Helpful Votes'])} helpful votes**")
+                            st.markdown(f"**{row['Title']}**")
+                            st.markdown(f"> {row['Review'][:500]}{'…' if len(str(row['Review'])) > 500 else ''}")
+                            st.divider()
+                else:
+                    st.caption("Helpful votes data not available.")
+
+            with tab_search:
+                query = st.text_input("Search this hotel's reviews", placeholder="e.g. breakfast, noisy, front desk", key="hotel_search")
+                if query:
+                    mask = hdf["text"].str.contains(query, case=False, na=False) | \
+                           hdf["title"].str.contains(query, case=False, na=False)
+                    results = hdf[mask]
+                    st.info(f"Found **{len(results):,}** reviews matching '**{query}**'")
+                    if not results.empty:
+                        for _, row in results.sort_values("date_parsed", ascending=False).head(20).iterrows():
+                            with st.container():
+                                st.markdown(f"**{'⭐' * int(row['rating_overall'])}** — *{row['date']}*")
+                                st.markdown(f"**{row['title']}**")
+                                st.markdown(f"> {str(row['text'])[:500]}{'…' if len(str(row['text'])) > 500 else ''}")
+                                st.divider()
+                else:
+                    st.caption("Enter keywords above to search within this hotel's reviews.")
+
+
+        elif sub_page == "📈 Historical Trends":
+            st.markdown(f"_Track performance metrics over time for **Hotel {selected}**_")
+
+            # Metrics selector
+            st.subheader("Monthly Performance Trends")
+            rating_choice = st.selectbox("Select Metric", list(RATING_LABELS.values()), key="hotel_trend_metric")
+            col_name = [k for k, v in RATING_LABELS.items() if v == rating_choice][0]
+
+            monthly = (hdf.set_index("date_parsed")
+                       .resample("ME")[col_name].agg(["mean", "count"]).reset_index())
         
-        fig = px.bar(sizes, x="Segment", y="Hotels", color="Segment",
-                     color_discrete_sequence=px.colors.qualitative.Pastel)
-        fig.update_layout(showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        st.subheader("Segment Characteristics")
-        st.info("How different segments perform across key metrics")
+            # Drop months with no data to avoid weird line jumps
+            monthly = monthly.dropna(subset=["mean"])
         
-        rating_cols = [c for c in df_cl.columns if c.startswith("avg_rating_")]
-        cluster_means = df_cl.groupby("cluster")[rating_cols].mean()
-        labels_short = [c.replace("avg_rating_", "").replace("_", " ").title() for c in rating_cols]
+            if not monthly.empty:
+                fig = px.line(monthly, x="date_parsed", y="mean",
+                              labels={"date_parsed": "Date", "mean": f"Avg {rating_choice}"},
+                              color_discrete_sequence=["#4299E1"])
+            
+                # Dual axis for volume
+                fig.add_bar(x=monthly["date_parsed"], y=monthly["count"], name="Review Volume",
+                            opacity=0.15, marker_color="#ED8936", yaxis="y2")
+            
+                fig.update_layout(
+                    title=f"{rating_choice} Trend — Hotel {selected}",
+                    yaxis2=dict(title="Review Volume", overlaying="y", side="right", showgrid=False),
+                    legend=dict(orientation="h", y=1.1),
+                    hovermode="x unified",
+                    yaxis=dict(range=[1, 5.2]) # Fix y-axis for ratings
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.caption("Not enough data to plot monthly trends for this hotel.")
 
-        fig = go.Figure()
-        for cid, row in cluster_means.iterrows():
-            fig.add_trace(go.Scatterpolar(
-                r=row.tolist() + [row.iloc[0]],
-                theta=labels_short + [labels_short[0]],
-                fill="toself", name=f"Segment {cid+1}",
-            ))
-        fig.update_layout(polar=dict(radialaxis=dict(range=[2, 5], visible=True)), height=400)
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Strategic Recommendations")
-    st.markdown("Actionable insights for hotels underperforming in their segment:")
-    recs = generate_recommendations(df_cl)
-    if len(recs) > 0:
-        # Clean up recommendation table for display
-        display_recs = recs.copy()
-        display_recs.columns = [c.replace("_", " ").title() for c in display_recs.columns]
-        st.dataframe(display_recs.head(15), use_container_width=True, hide_index=True)
-    else:
-        st.info("All hotels are performing well within their market segments.")
+            st.subheader("Year-over-Year Performance")
+            yearly = hdf.groupby("year")[RATING_COLUMNS].mean().reset_index()
+            if not yearly.empty:
+                yearly_melted = yearly.melt(id_vars="year", var_name="dimension", value_name="avg_rating")
+                yearly_melted["dimension"] = yearly_melted["dimension"].map(RATING_LABELS)
+            
+                fig = px.bar(yearly_melted, x="dimension", y="avg_rating", color="year",
+                             barmode="group", color_continuous_scale="Purples",
+                             labels={"dimension": "", "avg_rating": "Avg Rating"})
+                fig.update_layout(yaxis=dict(range=[1, 5.2]))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.caption("Not enough data to plot yearly trends for this hotel.")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 5: CUSTOMER PRIORITIES
-# ═══════════════════════════════════════════════════════════════════════════════
-elif page == "⭐ Customer Priorities":
+
+
+        elif sub_page == "🏅 Comparable Hotels":
+            st.markdown(f"_Who are the direct competitors for **Hotel {selected}**?_")
+    
+            # Recalculate clustering context for this page
+            min_rev_explorer = 5 
+            with st.spinner("Finding market peers..."):
+                df_cl = get_hotel_clusters(db_path, n_clusters=4, min_reviews=min_rev_explorer)
+            
+            in_cluster_analysis = not df_cl.empty and selected in df_cl.index
+        
+            if in_cluster_analysis:
+                tier_labels = assign_cluster_labels(df_cl)
+                cluster_id = df_cl.loc[selected, "cluster"]
+                cluster_peers = df_cl[df_cl["cluster"] == cluster_id]
+                cluster_mean = cluster_peers.mean()
+                segment_name = tier_labels.get(cluster_id, get_cluster_label(cluster_mean))
+            
+                st.success(f"**Hotel Tier:** Hotel {selected} belongs to **{segment_name}** along with {len(cluster_peers) - 1} other comparable hotels.")
+            
+                # Details Dialog Logic Cut from Main Page
+                @st.dialog("Hotel Details & Semantic Profile")
+                def show_competitor_details(peer_id, peer_overall, peer_count, cluster_mean_series):
+                    st.markdown(f"**Hotel {peer_id}**  —  ⭐ {peer_overall:.2f}  •  {peer_count} reviews")
+                
+                    # Rating breakdown
+                    peer_reviews = df[df["hotel_id"] == peer_id]
+                    peer_means = peer_reviews[RATING_COLUMNS].mean()
+                
+                    def _delta(col):
+                        val = peer_means.get(col, 0)
+                        avg = cluster_mean_series.get(f"avg_{col}", 3.0)
+                        diff = val - avg
+                        return f"{diff:+.2f} vs segment" if not pd.isna(diff) else None
+
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Overall", f"{peer_means.get('rating_overall', 0):.2f}", delta=_delta("rating_overall"))
+                    c2.metric("Service", f"{peer_means.get('rating_service', 0):.2f}", delta=_delta("rating_service"))
+                    c3.metric("Cleanliness", f"{peer_means.get('rating_cleanliness', 0):.2f}", delta=_delta("rating_cleanliness"))
+                    c4.metric("Value", f"{peer_means.get('rating_value', 0):.2f}", delta=_delta("rating_value"))
+                
+                    c5, c6, c7, c8 = st.columns(4)
+                    c5.metric("Location", f"{peer_means.get('rating_location', 0):.2f}", delta=_delta("rating_location"))
+                    c6.metric("Sleep", f"{peer_means.get('rating_sleep_quality', 0):.2f}", delta=_delta("rating_sleep_quality"))
+                    c7.metric("Rooms", f"{peer_means.get('rating_rooms', 0):.2f}", delta=_delta("rating_rooms"))
+                
+                    if "sentiment_polarity" in peer_reviews.columns:
+                        ps = peer_reviews["sentiment_polarity"].mean()
+                        sent_icon = "😊" if ps > 0.2 else ("😐" if ps > 0 else "😟")
+                        ps_avg = cluster_mean_series.get("avg_sentiment_polarity", 0)
+                        c8.metric("Sentiment", f"{ps:.2f} {sent_icon}", delta=f"{ps - ps_avg:+.2f} vs segment" if not pd.isna(ps_avg) else None)
+
+                    st.divider()
+
+                    # Top keywords via TF-IDF
+                    from sklearn.feature_extraction.text import TfidfVectorizer
+                    texts = peer_reviews["text"].dropna().tolist()
+                    if len(texts) >= 5:
+                        with st.spinner("Extracting representative phrases..."):
+                            hotel_stops = [
+                                "hotel", "room", "rooms", "bed", "bathroom", "good", "great", 
+                                "nice", "stay", "stayed", "time", "place", "really", "just", 
+                                "like", "didn", "don", "got", "did", "one", "night", "nights",
+                                "staff", "clean", "location", "would", "nyc", "york", "new york",
+                                "manhattan", "times square", "city", "friendly", "helpful",
+                                "small", "yes", "no", "very", "too", "much", "also", "well",
+                                "even", "could", "get", "make", "us", "we"
+                            ]
+                            from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+                            custom_stops = list(ENGLISH_STOP_WORDS) + hotel_stops
+
+                            tfidf = TfidfVectorizer(
+                                max_features=500, 
+                                stop_words=custom_stops,
+                                ngram_range=(2, 3), # Force bigrams and trigrams for context
+                                min_df=2, max_df=0.60,
+                            )
+                            try:
+                                X = tfidf.fit_transform(texts)
+                                scores = X.mean(axis=0).A1
+                                top_idx = scores.argsort()[-40:][::-1] # Look at top 40 first
+                                raw_keywords = [tfidf.get_feature_names_out()[i] for i in top_idx]
+                            
+                                final_keywords = []
+                                for kw in raw_keywords:
+                                    kw_words = set(kw.split())
+                                    if any(kw_words.issubset(set(fkw.split())) for fkw in final_keywords):
+                                        continue
+                                    final_keywords = [fkw for fkw in final_keywords if not set(fkw.split()).issubset(kw_words)]
+                                    final_keywords.append(kw)
+                                    if len(final_keywords) == 8:
+                                        break
+                            
+                                st.markdown("**🔑 Representative Phrases:**")
+                                bubble_css = "background-color: rgba(128, 128, 128, 0.2); color: inherit; border-radius: 12px; padding: 4px 12px; margin: 4px; display: inline-block; font-size: 0.9em;"
+                                st.markdown(" ".join([f"<span style='{bubble_css}'>{kw}</span>" for kw in final_keywords]), unsafe_allow_html=True)
+                            except Exception:
+                                st.caption("Could not extract enough meaningful phrases.")
+                    else:
+                        st.caption("Not enough reviews to extract reliable phrases.")
+
+                if len(cluster_peers) > 1:
+                    st.divider()
+                
+                    peers_display = cluster_peers.drop(index=selected).copy()
+                    # Sort option
+                    sort_peers_by = st.radio(
+                        "Sort by", ["Overall Rating", "Review Count"],
+                        horizontal=True, key="sort_peers_page", label_visibility="collapsed"
+                    )
+                    if sort_peers_by == "Overall Rating":
+                        peers_display = peers_display.sort_values("avg_rating_overall", ascending=False)
+                    else:
+                        peers_display = peers_display.sort_values("review_count", ascending=False)
+
+                    top_peers = peers_display.head(10)
+
+                    # Compact List Layout
+                    st.markdown("<div style='margin-bottom: 5px;'></div>", unsafe_allow_html=True)
+                
+                    # Header row
+                    h1, h2, h3, h4 = st.columns([3, 2, 2, 2])
+                    h1.caption("**HOTEL**")
+                    h2.caption("**RATING**")
+                    h3.caption("**REVIEWS**")
+                    h4.caption("")
+                    st.markdown("<hr style='margin: 0px 0 8px 0; border: none; border-bottom: 2px solid #e0e0e0;'/>", unsafe_allow_html=True)
+
+                    for peer_id in top_peers.index:
+                        peer_overall = top_peers.loc[peer_id, "avg_rating_overall"]
+                        peer_count = int(top_peers.loc[peer_id, "review_count"])
+                    
+                        c1, c2, c3, c4 = st.columns([3, 2, 2, 2], vertical_alignment="center")
+                        c1.markdown(f"**Hotel {peer_id}**")
+                    
+                        # Simple visual star rating
+                        stars = "⭐" * int(round(peer_overall))
+                        c2.markdown(f"{stars} **{peer_overall:.2f}**")
+                    
+                        c3.markdown(f"{peer_count:,}")
+                    
+                        with c4:
+                            if st.button("View Details", key=f"btn_page_{peer_id}", use_container_width=True):
+                                show_competitor_details(peer_id, peer_overall, peer_count, cluster_mean)
+                    
+                        st.markdown("<hr style='margin: 4px 0; border: none; border-bottom: 1px solid #f0f2f6;'/>", unsafe_allow_html=True)
+                else:
+                    st.info("There are no other hotels currently classified in this exact segment to display.")
+
+            else:
+                st.warning(f"**Market Segment:** This hotel does not have enough reviews (minimum {min_rev_explorer}) to be reliably placed into a competitive market segment, so we cannot identify direct comparable hotels for it.")
+
+
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # PAGE 4: CUSTOMER PRIORITIES
+    # ═══════════════════════════════════════════════════════════════════════════════
+elif active_view == "⭐ Customer Priorities":
     st.title("Customer Priorities")
     st.markdown("_What drives guest satisfaction?_")
 
@@ -380,8 +767,8 @@ elif page == "⭐ Customer Priorities":
         corr.index = [RATING_LABELS.get(c, c) for c in corr.index]
         
         fig = px.bar(x=corr.values, y=corr.index, orientation="h",
-                     labels={"x": "Impact on Overall Satisfaction", "y": ""},
-                     color=corr.values, color_continuous_scale="Teal")
+                    labels={"x": "Impact on Overall Satisfaction", "y": ""},
+                    color=corr.values, color_continuous_scale="Teal")
         fig.update_layout(height=500, xaxis_title="Correlation Strength")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -406,87 +793,11 @@ elif page == "⭐ Customer Priorities":
     # Visual comparison instead of just a table
     mobile_melted = mobile_comp.reset_index().melt(id_vars="index", var_name="Platform", value_name="Rating")
     fig = px.bar(mobile_melted, x="index", y="Rating", color="Platform", barmode="group",
-                 color_discrete_map={"Desktop": "#CBD5E0", "Mobile": "#667EEA"},
-                 labels={"index": ""})
+                color_discrete_map={"Desktop": "#CBD5E0", "Mobile": "#667EEA"},
+                labels={"index": ""})
     fig.update_layout(yaxis_range=[3, 5])
     st.plotly_chart(fig, use_container_width=True)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE: SENTIMENT ANALYSIS
-# ═══════════════════════════════════════════════════════════════════════════════
-elif page == "🧠 Sentiment Analysis":
-    st.title("Sentiment Intelligence")
-    st.markdown("_Understand the 'Why' behind the ratings using AI-powered text analysis_")
-
-    if "sentiment_polarity" not in df.columns:
-        st.error("Sentiment data not found. Please rebuild the database using `python src/data_processing.py`.")
-    else:
-        # Key Metrics
-        avg_polarity = df["sentiment_polarity"].mean()
-        positive_pct = (df["sentiment_polarity"] > 0.2).mean() * 100
-        negative_pct = (df["sentiment_polarity"] < -0.2).mean() * 100
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Overall Sentiment Score", f"{avg_polarity:.2f}",
-                  help="Ranges from -1 (Negative) to +1 (Positive)")
-        c2.metric("Positive Reviews", f"{positive_pct:.1f}%", help="Polarity > 0.2")
-        c3.metric("Critical Reviews", f"{negative_pct:.1f}%", help="Polarity < -0.2")
-
-        st.divider()
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Sentiment Distribution")
-            fig = px.histogram(df, x="sentiment_polarity", nbins=50,
-                               title="Distribution of Sentiment Scores",
-                               labels={"sentiment_polarity": "Sentiment Score (-1 to +1)"},
-                               color_discrete_sequence=["#9F7AEA"])
-            fig.update_layout(showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
-
-        with col2:
-            st.subheader("Sentiment vs. Rating")
-            # Sample for scatter plot performance
-            sample = df.sample(min(5000, len(df)))
-            fig = px.strip(sample, x="rating_overall", y="sentiment_polarity",
-                           title="Do High Ratings Always Mean Positive Text?",
-                           labels={"rating_overall": "Stars", "sentiment_polarity": "Sentiment"},
-                           color="rating_overall")
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Word Clouds (using pre-computed or generating on fly - generating on fly for now)
-        from wordcloud import WordCloud
-        import matplotlib.pyplot as plt
-
-        st.subheader("What People are Saying")
-        wc_col1, wc_col2 = st.columns(2)
-
-        def generate_wordcloud(text_data, title, cmap):
-            wc = WordCloud(width=400, height=200, background_color="#1A202C", max_words=100,
-                           colormap=cmap).generate(text_data)
-            fig, ax = plt.subplots()
-            ax.imshow(wc, interpolation="bilinear")
-            ax.axis("off")
-            ax.set_title(title, color="white")
-            return fig
-
-        with st.spinner("Analyzing text patterns..."):
-            with wc_col1:
-                pos_text = " ".join(df[df["sentiment_polarity"] > 0.4]["text"].head(1000))
-                if pos_text:
-                    st.pyplot(generate_wordcloud(pos_text, "Positive Key Themes", "Greens"))
-                else:
-                    st.info("Not enough positive data.")
-
-            with wc_col2:
-                neg_text = " ".join(df[df["sentiment_polarity"] < -0.1]["text"].head(1000))
-                if neg_text:
-                    st.pyplot(generate_wordcloud(neg_text, "Negative Key Themes", "Reds"))
-                else:
-                    st.info("Not enough negative data.")
-    
-    st.info("Note: Sentiment analysis uses Natural Language Processing (TextBlob) to evaluate the emotional tone of reviews.")
-
-# ── Footer ─────────────────────────────────────────────────────────────────────
+# Footer
 st.sidebar.divider()
-st.sidebar.caption("Hotel Performance Dashboard · v2.1")
+st.sidebar.caption("Powered by SQLite & Streamlit")

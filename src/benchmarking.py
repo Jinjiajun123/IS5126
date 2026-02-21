@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.utils import DB_PATH, RATING_COLUMNS, RATING_LABELS, get_db_connection
 
 
-# ── 1. Feature extraction ─────────────────────────────────────────────────────
+# 1. Feature extraction
 
 def compute_hotel_features(db_path: Path = DB_PATH, min_reviews: int = 10) -> pd.DataFrame:
     """
@@ -32,30 +32,87 @@ def compute_hotel_features(db_path: Path = DB_PATH, min_reviews: int = 10) -> pd
         avg_<rating>, review_count, avg_text_length, mobile_ratio
     """
     conn = get_db_connection(db_path)
-    query = """
-        SELECT
-            hotel_id,
-            COUNT(*)                       AS review_count,
-            AVG(rating_overall)            AS avg_rating_overall,
-            AVG(rating_service)            AS avg_rating_service,
-            AVG(rating_cleanliness)        AS avg_rating_cleanliness,
-            AVG(rating_value)              AS avg_rating_value,
-            AVG(rating_location)           AS avg_rating_location,
-            AVG(rating_sleep_quality)      AS avg_rating_sleep_quality,
-            AVG(rating_rooms)              AS avg_rating_rooms,
-            AVG(LENGTH(text))              AS avg_text_length,
-            AVG(via_mobile)                AS mobile_ratio
-        FROM reviews
-        GROUP BY hotel_id
-        HAVING COUNT(*) >= ?
-    """
+
+    # Check if the ML columns and review_weight exist in this database
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(reviews)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+    has_ml_cols = "ml_is_luxury" in existing_cols
+    has_weights = "review_weight" in existing_cols
+
+    if has_ml_cols:
+        if has_weights:
+            semantic_sql = """
+            SUM(ml_is_luxury   * review_weight) / SUM(review_weight) AS pct_luxury_mentions,
+            SUM(ml_is_budget   * review_weight) / SUM(review_weight) AS pct_budget_mentions,
+            SUM(ml_is_business * review_weight) / SUM(review_weight) AS pct_business_mentions"""
+        else:
+            semantic_sql = """
+            AVG(ml_is_luxury)              AS pct_luxury_mentions,
+            AVG(ml_is_budget)              AS pct_budget_mentions,
+            AVG(ml_is_business)            AS pct_business_mentions"""
+    else:
+        if has_weights:
+            semantic_sql = """
+            SUM((CASE WHEN LOWER(text) LIKE '%luxury%' OR LOWER(text) LIKE '%elegant%' OR LOWER(text) LIKE '%premium%' THEN 1.0 ELSE 0.0 END) * review_weight) / SUM(review_weight) AS pct_luxury_mentions,
+            SUM((CASE WHEN LOWER(text) LIKE '%cheap%' OR LOWER(text) LIKE '%budget%' OR LOWER(text) LIKE '%affordable%' THEN 1.0 ELSE 0.0 END) * review_weight) / SUM(review_weight) AS pct_budget_mentions,
+            SUM((CASE WHEN LOWER(text) LIKE '%business%' OR LOWER(text) LIKE '%conference%' OR LOWER(text) LIKE '%work%' THEN 1.0 ELSE 0.0 END) * review_weight) / SUM(review_weight) AS pct_business_mentions"""
+        else:
+            semantic_sql = """
+            AVG(CASE WHEN LOWER(text) LIKE '%luxury%' OR LOWER(text) LIKE '%elegant%' OR LOWER(text) LIKE '%premium%' THEN 1.0 ELSE 0.0 END) AS pct_luxury_mentions,
+            AVG(CASE WHEN LOWER(text) LIKE '%cheap%' OR LOWER(text) LIKE '%budget%' OR LOWER(text) LIKE '%affordable%' THEN 1.0 ELSE 0.0 END) AS pct_budget_mentions,
+            AVG(CASE WHEN LOWER(text) LIKE '%business%' OR LOWER(text) LIKE '%conference%' OR LOWER(text) LIKE '%work%' THEN 1.0 ELSE 0.0 END) AS pct_business_mentions"""
+
+    if has_weights:
+        # Weighted averages: high-credibility reviews have more influence
+        query = f"""
+            SELECT
+                hotel_id,
+                COUNT(*)                       AS review_count,
+                SUM(rating_overall       * review_weight) / SUM(review_weight) AS avg_rating_overall,
+                SUM(rating_service       * review_weight) / SUM(review_weight) AS avg_rating_service,
+                SUM(rating_cleanliness   * review_weight) / SUM(review_weight) AS avg_rating_cleanliness,
+                SUM(rating_value         * review_weight) / SUM(review_weight) AS avg_rating_value,
+                SUM(rating_location      * review_weight) / SUM(review_weight) AS avg_rating_location,
+                SUM(rating_sleep_quality * review_weight) / SUM(review_weight) AS avg_rating_sleep_quality,
+                SUM(rating_rooms         * review_weight) / SUM(review_weight) AS avg_rating_rooms,
+                SUM(LENGTH(text)         * review_weight) / SUM(review_weight) AS avg_text_length,
+                AVG(via_mobile)                AS mobile_ratio,
+                SUM(sentiment_polarity   * review_weight) / SUM(review_weight) AS avg_sentiment_polarity,
+                {semantic_sql}
+            FROM reviews
+            GROUP BY hotel_id
+            HAVING COUNT(*) >= ?
+        """
+    else:
+        # Fallback: simple averages (no weight column)
+        query = f"""
+            SELECT
+                hotel_id,
+                COUNT(*)                       AS review_count,
+                AVG(rating_overall)            AS avg_rating_overall,
+                AVG(rating_service)            AS avg_rating_service,
+                AVG(rating_cleanliness)        AS avg_rating_cleanliness,
+                AVG(rating_value)              AS avg_rating_value,
+                AVG(rating_location)           AS avg_rating_location,
+                AVG(rating_sleep_quality)      AS avg_rating_sleep_quality,
+                AVG(rating_rooms)              AS avg_rating_rooms,
+                AVG(LENGTH(text))              AS avg_text_length,
+                AVG(via_mobile)                AS mobile_ratio,
+                AVG(sentiment_polarity)        AS avg_sentiment_polarity,
+                {semantic_sql}
+            FROM reviews
+            GROUP BY hotel_id
+            HAVING COUNT(*) >= ?
+        """
+
     df = pd.read_sql_query(query, conn, params=(min_reviews,))
     conn.close()
     df.set_index("hotel_id", inplace=True)
     return df
 
 
-# ── 2. Clustering ──────────────────────────────────────────────────────────────
+# 2. Clustering
 
 def cluster_hotels(
     features_df: pd.DataFrame,
@@ -63,13 +120,28 @@ def cluster_hotels(
     random_state: int = 42,
 ) -> tuple[pd.DataFrame, float, KMeans, StandardScaler]:
     """
-    Cluster hotels by their rating profile using K-Means.
+    Cluster hotels by their rating profile and objective traits using K-Means.
 
     Returns:
         (df_with_cluster_col, silhouette, fitted_kmeans, fitted_scaler)
     """
     rating_cols = [c for c in features_df.columns if c.startswith("avg_rating_")]
-    X = features_df[rating_cols].dropna()
+    
+    # Feature Engineering: Include objective indicators & semantic markers of hotel size & class
+    hotel_traits = [
+        "avg_text_length", "mobile_ratio", "avg_sentiment_polarity",
+        "pct_luxury_mentions", "pct_budget_mentions", "pct_business_mentions"
+    ]
+    
+    feat_df = features_df.copy()
+    if "review_count" in feat_df.columns:
+        feat_df["log_review_count"] = np.log1p(feat_df["review_count"])
+        hotel_traits.append("log_review_count")
+    
+    # Keep only traits that actually existing in dataframe (safeguard)
+    hotel_traits = [t for t in hotel_traits if t in feat_df.columns]
+    features_to_use = rating_cols + hotel_traits
+    X = feat_df[features_to_use].dropna()
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
@@ -91,7 +163,22 @@ def find_optimal_k(
 ) -> dict[int, float]:
     """Compute silhouette score for each k → helps choose n_clusters."""
     rating_cols = [c for c in features_df.columns if c.startswith("avg_rating_")]
-    X = features_df[rating_cols].dropna()
+    
+    hotel_traits = [
+        "avg_text_length", "mobile_ratio", "avg_sentiment_polarity",
+        "pct_luxury_mentions", "pct_budget_mentions", "pct_business_mentions"
+    ]
+    
+    feat_df = features_df.copy()
+    if "review_count" in feat_df.columns:
+        feat_df["log_review_count"] = np.log1p(feat_df["review_count"])
+        hotel_traits.append("log_review_count")
+        
+    # Keep only traits that actually existing in dataframe (safeguard)
+    hotel_traits = [t for t in hotel_traits if t in feat_df.columns]
+    features_to_use = rating_cols + hotel_traits
+    X = feat_df[features_to_use].dropna()
+
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
@@ -103,7 +190,7 @@ def find_optimal_k(
     return scores
 
 
-# ── 3. Group analysis ──────────────────────────────────────────────────────────
+# 3. Group analysis
 
 def analyze_group_performance(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -120,7 +207,7 @@ def analyze_group_performance(df: pd.DataFrame) -> pd.DataFrame:
     return summary
 
 
-# ── 4. Recommendations ────────────────────────────────────────────────────────
+# 4. Recommendations
 
 def generate_recommendations(df: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
     """

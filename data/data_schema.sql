@@ -38,11 +38,15 @@ CREATE TABLE IF NOT EXISTS reviews (
     rating_location     REAL,
     rating_sleep_quality REAL,
     rating_rooms        REAL,
-    num_helpful_votes   INTEGER DEFAULT 0,
-    via_mobile          INTEGER DEFAULT 0,  -- boolean stored as 0/1
-    sentiment_polarity  REAL,
+    num_helpful_votes INTEGER,
+    via_mobile BOOLEAN,
+    sentiment_polarity REAL,
     sentiment_subjectivity REAL,
-    FOREIGN KEY (hotel_id) REFERENCES hotels(hotel_id),
+    review_weight REAL DEFAULT 1.0,
+    ml_is_luxury BOOLEAN DEFAULT 0,
+    ml_is_budget BOOLEAN DEFAULT 0,
+    ml_is_business BOOLEAN DEFAULT 0,
+    FOREIGN KEY(hotel_id) REFERENCES hotels(hotel_id),
     FOREIGN KEY (author_id) REFERENCES authors(author_id)
 );
 

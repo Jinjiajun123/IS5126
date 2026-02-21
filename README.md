@@ -76,6 +76,7 @@ student-name-hotel-analytics/
 
 #### 3. Technical Report (8-10 pages; Submit on Canvas)
 *   **Format:** PDF, excluding cover page, references, and appendices.
+*   **Report Header:** GitHub repository URL, student name(s) and ID (start with A...)
 
 **Required Sections:**
 1.  **Executive Summary:** Business problem and solution overview, key findings.
