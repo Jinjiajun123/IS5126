@@ -1,100 +1,38 @@
-# 运行方法
-## 1. Install dependencies
-pip install -r requirements.txt
 
-## 2. Build database (already done — skip if reviews.db exists)
-python src/data_processing.py
 
-## 3. Run notebooks in order
-jupyter notebook notebooks/
+## Dashboard User Documentation
 
-## 4. Launch dashboard
-streamlit run app/streamlit_app.py
+Welcome to the **Hotel Analytics Dashboard**. This application is designed to help hotel managers visualize reviews, understand competitive positioning, and identify actionable areas for improvement.
 
-# Assignment Overview
+### How to Start the Dashboard
+1. Ensure your virtual environment is active and dependencies are installed (`pip install -r requirements.txt`).
+2. Run the Streamlit application from the root directory:
+   ```bash
+   streamlit run app/streamlit_app.py
+   ```
+3. The dashboard will automatically open in your default web browser at `http://localhost:8501`.
 
-## Business Context
-You are a group of Data Science Consultants hired by **HospitalityTech Solutions**, a SaaS company providing analytics platforms to hotels. They need you to build an intelligent analytics platform that helps hotel managers:
+### Navigation & Features
+Use the **Main Menu** in the left sidebar to navigate between different analytical views:
 
-*   **Understand** customer satisfaction drivers
-*   **Identify** improvement opportunities
-*   **Benchmark** against competitors
-*   **Predict** future trends
-*   **Optimize** resource allocation
+#### 1. 📊 Executive Overview
+* **Purpose:** A high-level, macro perspective of the entire datasets.
+* **Key Visuals:**
+  * **Global Rating Distribution:** A donut chart showing the proportion of reviews by star rating.
+  * **Review Volume Trend:** A smooth area chart plotting the growth of review volume over the 5-year period.
+  * **Top Performing Hotels Leaderboard:** A dynamic table highlighting the absolute best hotels (minimum 50 reviews), featuring interactive progress bars for review volume.
 
-Your task is to develop a working product that hotel managers can use to make data-driven decisions.
+#### 2. 🔍 Hotel Explorer
+* **Purpose:** A micro-level deep dive into a specific hotel's performance compared to its algorithmic peers.
+* **How to use:** 
+  * Select or type a `Hotel ID` in the large, centralized search box.
+  * **Overview Tab:** Displays the hotel's exact market segment (e.g., Luxury, Budget) calculated via K-Means clustering, and shows delta comparisons (+/-) against its direct competitors for Service, Cleanliness, Value, etc.
+  * **Historical Trends Tab:** Visualizes how this specific hotel's ratings have evolved over time.
+  * **Comparable Hotels Tab:** Lists other properties within the same market segment for direct competitive analysis.
 
----
+#### 3. ⭐ Customer Priorities
+* **Purpose:** Analyzes the structured NLP data to determine what customers actually care about.
+* **Key Visuals:** Explores correlations between text length, sentiment polarity, and the ultimate `rating_overall` score.
 
-## Assignment 1: Data Foundation & Exploratory Analytics (15%)
-**Duration:** Weeks 2-6  
-**Submission Deadline:** See Canvas  
-**Weight:** 15% of final course grade
-
-### Objectives
-Build a foundational analytics system with:
-1.  **Efficient data storage and retrieval:** SQLite database with 50,000–80,000 reviews.
-2.  **Comprehensive exploratory analysis:** Statistical rigor in findings.
-3.  **Performance optimization:** Through query and code profiling.
-4.  **Competitive benchmarking strategy:** For hotel comparison.
-5.  **User-friendly dashboard:** For non-technical users.
-
-### Deliverables
-
-#### 1. GitHub Repository Structure
-```text
-student-name-hotel-analytics/
-├── README.md                   # Setup and usage instructions
-├── requirements.txt            # Python dependencies
-├── .gitignore                  
-├── data/
-│   ├── reviews_sample.db       # SQLite with 5000+ sample reviews
-│   └── data_schema.sql         # (Optional) Schema documentation
-├── notebooks/
-│   ├── 01_data_preparation.ipynb
-│   ├── 02_exploratory_analysis.ipynb
-│   ├── 03_competitive_benchmarking.ipynb
-│   └── 04_performance_profiling.ipynb
-├── src/
-│   ├── data_processing.py
-│   ├── benchmarking.py
-│   └── utils.py
-├── app/
-│   └── streamlit_app.py        # Dashboard application
-├── profiling/
-│   ├── query_results.txt       # Query profiling outputs
-│   └── code_profiling.txt      # Code profiling results
-└── reports/
-    └── assignment1_report.pdf  # 8-10 pages (excluding cover, references, appendices)
-```
-
-#### 2. Data Requirements
-*   **Timeframe:** Use latest 5 years available.
-*   **Volume:** At least 50,000–80,000+ reviews (after filtering).
-*   **Storage:** SQLite database with appropriate schema design.
-*   **Sample Data:** Include 5,000+ reviews in repository (for TAs to test).
-
-#### 3. Technical Report (8-10 pages; Submit on Canvas)
-*   **Format:** PDF, excluding cover page, references, and appendices.
-*   **Report Header:** GitHub repository URL, student name(s) and ID (start with A...)
-
-**Required Sections:**
-1.  **Executive Summary:** Business problem and solution overview, key findings.
-2.  **Data Foundation:** Data filtering rationale, schema design (ER diagram optional), indexing strategy, and data statistics.
-3.  **Exploratory Data Analysis:** Key insights with business implications.
-4.  **Performance Profiling & Optimization:** Query profiling and code profiling results.
-5.  **Competitive Benchmarking Strategy:**
-    *   *Business Context:* Hotel managers struggle to identify meaningful improvement opportunities ("Who are my real competitors?").
-    *   Methodology for identifying comparable hotel groups.
-    *   Performance analysis across groups and identification of best practices.
-    *   Specific, actionable recommendations.
-    *   Validation of approach.
-    *   *Note: This is an open-ended problem. Propose and implement YOUR solution.*
-6.  **System Architecture & Dashboard:** User interface rationale and key features.
-7.  **Conclusion:** Key observations, deliverables, limitations, and future enhancements (2-3 sentences).
-*   *For Group Submissions:* Include a member contribution summary table at the beginning.
-
-#### 4. Working Dashboard (Streamlit)
-*   Functional dashboard with web interface.
-*   3-5 core features that solve business problems.
-*   User documentation in `README.md` (GitHub).
+### Data Source Toggle
+At the top of the sidebar, you can toggle **"🧪 Use ML Sample Dataset"**. This switches the dashboard from the massive >90,000 review database to the lightweight `reviews_sample.db` (5,000+ reviews), which is useful for rapid testing or running on machines with limited memory.

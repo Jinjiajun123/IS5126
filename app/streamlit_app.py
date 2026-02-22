@@ -161,6 +161,7 @@ st.sidebar.title("Hotel Analytics")
 
 use_sample = st.sidebar.toggle("🧪 Use ML Sample Dataset", value=False, help="Switch to the 5,000-review sample database that has full NLP features extracted.")
 
+# ── Cross-page Navigation ────────────────────────────────────────────────────
 # Initialize session state for cross-page navigation
 if "nav_hotel_id" not in st.session_state:
     st.session_state.nav_hotel_id = None
@@ -170,7 +171,8 @@ main_page = st.sidebar.radio(
     [
         "📊 Executive Overview", 
         "🔍 Hotel Explorer",
-        "⭐ Customer Priorities"
+        "⭐ Customer Priorities",
+        "📥 Upload Data",
     ],
     key="main_menu",
 )
@@ -797,6 +799,181 @@ elif active_view == "⭐ Customer Priorities":
                 labels={"index": ""})
     fig.update_layout(yaxis_range=[3, 5])
     st.plotly_chart(fig, use_container_width=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE 5: UPLOAD DATA
+# ═══════════════════════════════════════════════════════════════════════════════
+elif active_view == "📥 Upload Data":
+    # Custom CSS for this page
+    st.markdown("""
+    <style>
+    .upload-hero { text-align: center; padding: 3rem 1rem 1.5rem 1rem; }
+    .upload-hero h1 { font-size: 2.4rem; font-weight: 700; color: #1e293b; margin-bottom: 0.4rem; }
+    .upload-hero p { font-size: 1.05rem; color: #64748b; max-width: 560px; margin: 0 auto; }
+    .schema-card {
+        background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px;
+        padding: 1.2rem 1.5rem; font-family: monospace; font-size: 0.85rem;
+        color: #334155; line-height: 1.7;
+    }
+    .step-badge {
+        display: inline-block; background: #4f46e5; color: white; border-radius: 50%;
+        width: 28px; height: 28px; text-align: center; line-height: 28px;
+        font-weight: 700; font-size: 0.85rem; margin-right: 8px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="upload-hero">
+        <h1>📥 Upload Review Data</h1>
+        <p>Append new hotel reviews from a JSON file directly into the analytics database.
+           Uploaded records are processed, filtered, and reflected across all dashboard views instantly.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.divider()
+
+    left_col, right_col = st.columns([1, 1.1], gap="large")
+
+    with left_col:
+        st.subheader("📋 How It Works")
+        st.markdown("""
+        <div style="line-height: 2.2; color: #475569;">
+        <span class="step-badge">1</span> Prepare a <strong>.json</strong> file with <strong>one review per line</strong>.<br>
+        <span class="step-badge">2</span> Drop the file into the uploader panel on the right.<br>
+        <span class="step-badge">3</span> Click <strong>Start Ingestion</strong> and watch the live progress.<br>
+        <span class="step-badge">4</span> Dashboard <strong>auto-refreshes</strong> — no manual reload needed.
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("#### Required JSON Fields")
+        st.markdown("""
+        <div class="schema-card">
+        {<br>
+        &nbsp;&nbsp;<span style="color:#4f46e5;">"id"</span>: 123456,<br>
+        &nbsp;&nbsp;<span style="color:#4f46e5;">"offering_id"</span>: 78901,<br>
+        &nbsp;&nbsp;<span style="color:#4f46e5;">"date"</span>: <span style="color:#16a34a;">"December 5, 2011"</span>,<br>
+        &nbsp;&nbsp;<span style="color:#4f46e5;">"text"</span>: <span style="color:#16a34a;">"Great hotel..."</span>,<br>
+        &nbsp;&nbsp;<span style="color:#4f46e5;">"ratings"</span>: { <span style="color:#4f46e5;">"overall"</span>: 5 },<br>
+        &nbsp;&nbsp;<span style="color:#4f46e5;">"author"</span>: { <span style="color:#4f46e5;">"id"</span>: <span style="color:#16a34a;">"abc123"</span> }<br>
+        }
+        </div>
+        """, unsafe_allow_html=True)
+        st.caption("Filters: English only · ≥20 chars · Year 2008–2012 · Must have overall rating.")
+
+    with right_col:
+        st.subheader("📂 Select File")
+
+        target_db = Path(detect_db(force_sample=use_sample))
+        db_label = "ML Sample DB" if use_sample else "Full Production DB"
+        st.info(f"**Target:** {db_label} (`{target_db.name}`)", icon="🗄️")
+
+        uploaded_file = st.file_uploader(
+            "Drop your JSON file here",
+            type=["json"],
+            key="json_uploader_page",
+            help="One JSON object per line. Max 200 MB.",
+        )
+
+        if uploaded_file is not None:
+            file_size_kb = len(uploaded_file.getvalue()) / 1024
+            st.success(f"**{uploaded_file.name}** — {file_size_kb:,.1f} KB ready to process.", icon="📄")
+
+            if st.button("⚡ Start Ingestion", use_container_width=True, type="primary", key="ingest_btn"):
+                import json as _json
+                from src.data_processing import ingest_uploaded_reviews
+
+                raw_bytes = uploaded_file.read()
+                text = raw_bytes.decode("utf-8").strip()
+                lines = text.splitlines()
+
+                if not lines:
+                    st.error("The file appears to be empty.")
+                else:
+                    records = []
+                    parse_errors = 0
+
+                    # First try fast NDJSON (one JSON object per line)
+                    for ln in lines:
+                        ln = ln.strip()
+                        if not ln:
+                            continue
+                        try:
+                            records.append(_json.loads(ln))
+                        except _json.JSONDecodeError:
+                            parse_errors += 1
+
+                    # If NDJSON failed almost entirely, try parsing as multi-object stream
+                    # (pretty-printed JSON with one object per top-level { ... } block)
+                    if not records or (parse_errors > 0 and parse_errors >= len(records)):
+                        records = []
+                        parse_errors = 0
+                        depth = 0
+                        buf = ""
+                        for ch in text:
+                            buf += ch
+                            if ch == "{":
+                                depth += 1
+                            elif ch == "}":
+                                depth -= 1
+                                if depth == 0 and buf.strip():
+                                    try:
+                                        records.append(_json.loads(buf.strip()))
+                                    except _json.JSONDecodeError:
+                                        parse_errors += 1
+                                    buf = ""
+
+
+                    if not records:
+                        st.error(f"No valid JSON lines found. ({parse_errors} malformed lines skipped.)")
+                    else:
+                        if parse_errors > 0:
+                            st.warning(f"⚠️ {parse_errors} malformed line(s) will be skipped.")
+
+                        st.markdown("---")
+                        status_text = st.empty()
+                        progress_bar = st.progress(0)
+                        stats_placeholder = st.empty()
+
+                        def _update_progress(done: int, total: int):
+                            pct = done / total
+                            progress_bar.progress(
+                                pct,
+                                text=f"Processing **{done:,}** / **{total:,}** records — {pct*100:.1f}%"
+                            )
+
+                        status_text.info(f"🔄 Ingesting **{len(records):,}** records into `{target_db.name}`…")
+
+                        try:
+                            result = ingest_uploaded_reviews(
+                                records,
+                                db_path=target_db,
+                                progress_callback=_update_progress,
+                            )
+                            progress_bar.progress(1.0, text="✅ Processing complete!")
+                            status_text.empty()
+                            stats_placeholder.success(
+                                f"**Ingestion complete!**\n\n"
+                                f"- ✅ **{result['inserted']:,}** new reviews inserted\n"
+                                f"- 🚫 **{result['skipped']:,}** records filtered/skipped\n"
+                                f"- 🗄️ **{result['total_reviews_in_db']:,}** total reviews in database"
+                            )
+                            st.balloons()
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as exc:
+                            progress_bar.empty()
+                            status_text.error(f"❌ Ingestion failed: {exc}")
+        else:
+            st.markdown("""
+            <div style="border: 2px dashed #cbd5e1; border-radius: 12px; padding: 2.5rem 1rem;
+                        text-align: center; color: #94a3b8; margin-top: 1rem; background: #f8fafc;">
+                <div style="font-size: 2.8rem;">☁️</div>
+                <div style="font-size: 1rem; margin-top: 0.5rem; line-height: 1.8;">
+                    Drag & drop your JSON file above<br>or click <strong>Browse files</strong>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
 # Footer
 st.sidebar.divider()

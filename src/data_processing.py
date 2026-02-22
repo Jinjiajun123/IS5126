@@ -295,6 +295,81 @@ def build_database(db_path: Path = DB_PATH, limit: int | None = 100_000) -> int:
     return total
 
 
+def ingest_uploaded_reviews(
+    records: list[dict],
+    db_path: Path = DB_PATH,
+    progress_callback=None,
+) -> dict:
+    """
+    Ingest a list of raw JSON review dicts (already parsed from an uploaded file)
+    into an existing SQLite database, appending new records without wiping existing data.
+
+    Args:
+        records:           List of raw dicts matching the source JSON schema.
+        db_path:           Target SQLite database path (must already have schema).
+        progress_callback: Optional callable(done: int, total: int) for UI progress updates.
+
+    Returns:
+        dict with keys: inserted, skipped, total_reviews_in_db
+    """
+    if not db_path.exists():
+        # Bootstrap the schema if this is a fresh DB
+        conn = sqlite3.connect(str(db_path))
+        _create_schema(conn)
+        conn.close()
+
+    conn = sqlite3.connect(str(db_path))
+
+    hotels_batch: dict = {}
+    authors_batch: dict = {}
+    reviews_batch: list = []
+    inserted = 0
+    skipped = 0
+    total = len(records)
+
+    for i, raw in enumerate(records):
+        parsed = _parse_review(raw)
+        if parsed is None:
+            skipped += 1
+        else:
+            hotels_batch[parsed["hotel_id"]] = True
+            aid = parsed["author"]["author_id"]
+            if aid and aid not in authors_batch:
+                authors_batch[aid] = parsed["author"]
+            reviews_batch.append(parsed["review"])
+            inserted += 1
+
+        # Flush in batches for responsiveness
+        if len(reviews_batch) >= BATCH_SIZE:
+            _insert_batch(conn, hotels_batch, authors_batch, reviews_batch)
+            hotels_batch.clear()
+            authors_batch.clear()
+            reviews_batch.clear()
+
+        if progress_callback:
+            progress_callback(i + 1, total)
+
+    # Flush remaining
+    if reviews_batch:
+        _insert_batch(conn, hotels_batch, authors_batch, reviews_batch)
+
+    # Update hotel review counts
+    conn.execute("""
+        UPDATE hotels SET num_reviews = (
+            SELECT COUNT(*) FROM reviews WHERE reviews.hotel_id = hotels.hotel_id
+        )
+    """)
+    conn.commit()
+
+    # Recompute credibility weights to include the new records
+    compute_review_weights(conn)
+
+    total_in_db = conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0]
+    conn.close()
+
+    return {"inserted": inserted, "skipped": skipped, "total_reviews_in_db": total_in_db}
+
+
 def compute_review_weights(conn: sqlite3.Connection) -> None:
     """
     Compute a credibility weight for each review based on 4 signals:
